@@ -1,0 +1,52 @@
+name: PS5 Pro stock check
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"  # GitHub's minimum; actual runs are often delayed a few minutes
+  workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send a test email instead of checking stock"
+        type: boolean
+        default: false
+
+concurrency:
+  group: stock-check
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT || '465' }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      ALERT_TO: ${{ secrets.ALERT_TO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Send test email
+        if: ${{ inputs.test_email }}
+        run: python3 stock_alert.py --test-email
+
+      # state.json carries alert/failure history between runs so you aren't spammed.
+      - name: Restore state
+        if: ${{ !inputs.test_email }}
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: stock-state-${{ github.run_id }}
+          restore-keys: stock-state-
+
+      # Check every 60s for ~4 min so coverage stays near-continuous between scheduled runs.
+      - name: Check stock
+        if: ${{ !inputs.test_email }}
+        run: python3 stock_alert.py --loop 60 --count 5
+
+      - name: Save state
+        if: ${{ !inputs.test_email && always() }}
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: stock-state-${{ github.run_id }}
