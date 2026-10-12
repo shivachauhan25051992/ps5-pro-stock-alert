@@ -84,7 +84,7 @@ def send_email(subject, body):
     port = int(os.environ.get("SMTP_PORT", "465"))
     user = os.environ["SMTP_USER"]
     password = os.environ["SMTP_PASSWORD"]
-    to = os.environ.get("ALERT_TO", user)
+    to = os.environ.get("ALERT_TO") or user
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -98,6 +98,68 @@ def send_email(subject, body):
     log(f"Email sent to {to}: {subject}")
 
 
+def send_ntfy(subject, body, urgent):
+    """Push to the ntfy Android app (https://ntfy.sh)."""
+    server = os.environ.get("NTFY_SERVER") or "https://ntfy.sh"
+    req = urllib.request.Request(
+        f"{server.rstrip('/')}/{os.environ['NTFY_TOPIC']}",
+        data=body.encode(),
+        headers={
+            # HTTP headers must be latin-1; ntfy renders the emoji tag instead.
+            "Title": subject.encode("ascii", "ignore").decode().strip(),
+            "Priority": "urgent" if urgent else "default",
+            "Tags": "rotating_light" if urgent else "warning",
+            "Click": STORE_URL,
+        },
+        method="POST",
+    )
+    urllib.request.urlopen(req, timeout=20).close()
+    log(f"ntfy push sent: {subject}")
+
+
+def send_github_issue(subject, body):
+    """Open an issue that mentions and assigns the repo owner, so the GitHub app pushes a notification."""
+    repo = os.environ["GITHUB_REPOSITORY"]
+    owner = os.environ.get("GITHUB_REPOSITORY_OWNER") or repo.split("/")[0]
+    payload = {"title": subject, "body": f"@{owner}\n\n{body}", "assignees": [owner]}
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/issues",
+        data=json.dumps(payload).encode(),
+        headers={
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        url = json.load(resp)["html_url"]
+    log(f"GitHub issue opened: {url}")
+
+
+def notify(subject, body, urgent=True, github=True):
+    """Send through every configured channel. Returns True if at least one succeeded."""
+    channels = []
+    if os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASSWORD"):
+        channels.append(("email", lambda: send_email(subject, body)))
+    if os.environ.get("NTFY_TOPIC"):
+        channels.append(("ntfy", lambda: send_ntfy(subject, body, urgent)))
+    if github and os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
+        channels.append(("github", lambda: send_github_issue(subject, body)))
+    if not channels:
+        log("No notification channels configured")
+        return False
+
+    sent = False
+    for name, send in channels:
+        try:
+            send()
+            sent = True
+        except Exception as exc:
+            log(f"Could not send {name} notification: {exc!r}")
+    return sent
+
+
 def check_once():
     state = load_state()
     try:
@@ -106,15 +168,13 @@ def check_once():
         state["failures"] = state.get("failures", 0) + 1
         log(f"Check failed ({state['failures']} in a row): {exc!r}")
         if state["failures"] >= ERROR_ALERT_THRESHOLD and not state.get("error_alerted"):
-            try:
-                send_email(
-                    "PS5 Pro stock checker is failing",
-                    f"The last {state['failures']} checks failed.\nLatest error: {exc!r}\n\n"
-                    f"Check the store manually: {STORE_URL}",
-                )
-                state["error_alerted"] = True
-            except Exception as mail_exc:
-                log(f"Could not send error email: {mail_exc!r}")
+            state["error_alerted"] = notify(
+                "PS5 Pro stock checker is failing",
+                f"The last {state['failures']} checks failed.\nLatest error: {exc!r}\n\n"
+                f"Check the store manually: {STORE_URL}",
+                urgent=False,
+                github=False,
+            )
         save_state(state)
         return
 
@@ -124,18 +184,18 @@ def check_once():
 
     now = time.time()
     if in_stock and (not state["in_stock"] or now - state.get("last_alert", 0) >= REMIND_EVERY_SECONDS):
-        try:
-            send_email(
-                "🚨 PS5 Pro IN STOCK at PlayStation Direct NL!",
-                f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price}).\n\n"
-                f"Buy it here: {STORE_URL}\n\n"
-                f"Checked at {datetime.now():%Y-%m-%d %H:%M:%S}.",
-            )
-            state["last_alert"] = now
-        except Exception as mail_exc:
-            log(f"Could not send stock email: {mail_exc!r}")
+        sent = notify(
+            "🚨 PS5 Pro IN STOCK at PlayStation Direct NL!",
+            f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price}).\n\n"
+            f"Buy it here: {STORE_URL}\n\n"
+            f"Checked at {datetime.now():%Y-%m-%d %H:%M:%S}.",
+            # One issue per restock; reminders go to email and ntfy only.
+            github=not state["in_stock"],
+        )
+        if not sent:
             save_state(state)  # keep in_stock False so the next run retries
             return
+        state["last_alert"] = now
     state["in_stock"] = in_stock
     save_state(state)
 
@@ -144,13 +204,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loop", type=int, metavar="SECONDS", help="keep checking every SECONDS")
     parser.add_argument("--count", type=int, help="with --loop, stop after this many checks")
-    parser.add_argument("--test-email", action="store_true", help="send a test email and exit")
+    parser.add_argument("--test", "--test-email", action="store_true",
+                        help="send a test notification through every configured channel and exit")
     args = parser.parse_args()
 
     load_env()
-    if args.test_email:
-        send_email("PS5 Pro stock alert: test email", f"Email alerts are working.\n\n{STORE_URL}")
-        return
+    if args.test:
+        ok = notify("PS5 Pro stock alert: test notification",
+                    f"Notifications are working. You can close this.\n\n{STORE_URL}")
+        return 0 if ok else 1
 
     if args.loop:
         checks = 0
