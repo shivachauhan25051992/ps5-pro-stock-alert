@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       test_notify:
-        description: "Send a test notification (email, ntfy, GitHub issue) instead of checking stock"
+        description: "Send a test notification (ntfy, plus email if configured) instead of checking stock"
         type: boolean
         default: false
 
@@ -15,7 +15,6 @@ concurrency:
 
 permissions:
   contents: read
-  issues: write  # opens an issue that mentions you, for GitHub app push notifications
 
 jobs:
   check:
@@ -28,7 +27,6 @@ jobs:
       SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
       ALERT_TO: ${{ secrets.ALERT_TO }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
-      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 

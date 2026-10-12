@@ -117,35 +117,13 @@ def send_ntfy(subject, body, urgent):
     log(f"ntfy push sent: {subject}")
 
 
-def send_github_issue(subject, body):
-    """Open an issue that mentions and assigns the repo owner, so the GitHub app pushes a notification."""
-    repo = os.environ["GITHUB_REPOSITORY"]
-    owner = os.environ.get("GITHUB_REPOSITORY_OWNER") or repo.split("/")[0]
-    payload = {"title": subject, "body": f"@{owner}\n\n{body}", "assignees": [owner]}
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{repo}/issues",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        url = json.load(resp)["html_url"]
-    log(f"GitHub issue opened: {url}")
-
-
-def notify(subject, body, urgent=True, github=True):
+def notify(subject, body, urgent=True):
     """Send through every configured channel. Returns True if at least one succeeded."""
     channels = []
     if os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASSWORD"):
         channels.append(("email", lambda: send_email(subject, body)))
     if os.environ.get("NTFY_TOPIC"):
         channels.append(("ntfy", lambda: send_ntfy(subject, body, urgent)))
-    if github and os.environ.get("GITHUB_TOKEN") and os.environ.get("GITHUB_REPOSITORY"):
-        channels.append(("github", lambda: send_github_issue(subject, body)))
     if not channels:
         log("No notification channels configured")
         return False
@@ -173,7 +151,6 @@ def check_once():
                 f"The last {state['failures']} checks failed.\nLatest error: {exc!r}\n\n"
                 f"Check the store manually: {STORE_URL}",
                 urgent=False,
-                github=False,
             )
         save_state(state)
         return
@@ -189,8 +166,6 @@ def check_once():
             f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price}).\n\n"
             f"Buy it here: {STORE_URL}\n\n"
             f"Checked at {datetime.now():%Y-%m-%d %H:%M:%S}.",
-            # One issue per restock; reminders go to email and ntfy only.
-            github=not state["in_stock"],
         )
         if not sent:
             save_state(state)  # keep in_stock False so the next run retries
@@ -211,7 +186,7 @@ def main():
     load_env()
     if args.test:
         ok = notify("PS5 Pro stock alert: test notification",
-                    f"Notifications are working. You can close this.\n\n{STORE_URL}")
+                    f"Notifications are working.\n\n{STORE_URL}")
         return 0 if ok else 1
 
     if args.loop:
