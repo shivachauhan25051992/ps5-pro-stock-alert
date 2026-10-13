@@ -1,0 +1,15 @@
+name = "ps5-pro-stock-alert"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+workers_dev = false  # no public URL; it only runs on the cron schedule
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+# Remembers alert/failure history between runs (created with `npx wrangler kv namespace create STATE`).
+[[kv_namespaces]]
+binding = "STATE"
+id = "de72008d0ec6447e8a4111ad1778f185"

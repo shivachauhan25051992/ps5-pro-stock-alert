@@ -1,0 +1,13 @@
+{
+  "name": "ps5-pro-stock-alert-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev --test-scheduled",
+    "logs": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "4.143.0"
+  }
+}
