@@ -15,10 +15,13 @@ import urllib.request
 from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 ENV_FILE = ROOT / ".env"
 STATE_FILE = ROOT / "state.json"
+# GitHub runners use UTC; show times as they are in the Netherlands.
+TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
 PRODUCT_CODE = "1000050720-BX"  # PS5 Pro Console - 2TB (NL)
 STORE_URL = "https://direct.playstation.com/nl-nl/buy-consoles/playstation5-pro-console-2-tb"
@@ -41,7 +44,7 @@ ERROR_ALERT_THRESHOLD = 10
 
 
 def log(msg):
-    print(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}", flush=True)
+    print(f"[{datetime.now(TIMEZONE).isoformat(timespec='seconds')}] {msg}", flush=True)
 
 
 def load_env():
@@ -165,7 +168,7 @@ def check_once():
             "🚨 PS5 Pro IN STOCK at PlayStation Direct NL!",
             f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price}).\n\n"
             f"Buy it here: {STORE_URL}\n\n"
-            f"Checked at {datetime.now():%Y-%m-%d %H:%M:%S}.",
+            f"Checked at {datetime.now(TIMEZONE):%Y-%m-%d %H:%M:%S %Z}.",
         )
         if not sent:
             save_state(state)  # keep in_stock False so the next run retries
