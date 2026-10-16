@@ -1,20 +1,19 @@
-// Cloudflare Worker: check PlayStation Direct NL for PS5 Pro stock and push an ntfy alert.
+// Cloudflare Worker: check the PlayStation NL store for PS5 Pro stock and push an ntfy alert.
 // A cron trigger runs every minute; each run checks CHECKS_PER_RUN times, spread across the minute.
 
-const PRODUCT_CODE = "1000050720-BX"; // PS5 Pro Console - 2TB (NL)
-const STORE_URL = "https://direct.playstation.com/nl-nl/buy-consoles/playstation5-pro-console-2-tb";
-const API_URL =
-  "https://api.direct.playstation.com/commercewebservices/ps-direct-nl/users/anonymous/" +
-  `products/productList?fields=BASIC&lang=nl_NL&productCodes=${PRODUCT_CODE}`;
+// PlayStation Direct NL moved to playstation.com in Oct 2026, and the old stock API now returns 403.
+// The new product page embeds the live stock status in its server-rendered data.
+const PRODUCT_ID = "PSD001-PSDE01942_39-PS5PROCHASASIRSE"; // PS5 Pro Console - 2TB (NL)
+const STORE_URL = "https://www.playstation.com/nl-nl/ps5/ps5-pro/buy-now/";
 const HEADERS = {
   "User-Agent":
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/129.0 Safari/537.36",
-  Accept: "application/json",
+  Accept: "text/html,application/xhtml+xml",
   "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
-  Origin: "https://direct.playstation.com",
-  Referer: STORE_URL,
 };
+const STATUS_RE = /"stockLevelStatus":"([A-Z_]+)"/g;
+const PRICE_RE = /"price":"([0-9.]+)","priceCurrency":"EUR"/;
 const CHECKS_PER_RUN = 2; // every ~30s
 const CHECK_SPACING_MS = 30_000;
 // Re-send the in-stock alert at this interval while stock remains available.
@@ -30,15 +29,16 @@ function nlTime() {
 }
 
 async function fetchStock() {
-  const resp = await fetch(API_URL, { headers: HEADERS, cf: { cacheTtl: 0 } });
+  const resp = await fetch(STORE_URL, { headers: HEADERS, cf: { cacheTtl: 0 } });
+  // Sony puts a virtual waiting room in front of the store during drops.
+  if (new URL(resp.url).hostname.includes("queue")) return { inStock: true, status: "QUEUE", price: null };
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-  const product = (await resp.json()).products[0];
-  const status = product.stock?.stockLevelStatus ?? "unknown";
-  const price = product.price?.value;
-  const inStock =
-    (product.purchasable && (status === "inStock" || status === "lowStock")) ||
-    (product.maxOrderQuantity ?? 0) > 0;
-  return { inStock, status, price };
+  const page = (await resp.text()).replaceAll('\\"', '"');
+  if (!page.includes(PRODUCT_ID)) throw new Error(`PS5 Pro product data not found on ${resp.url}`);
+  const statuses = [...new Set([...page.matchAll(STATUS_RE)].map((m) => m[1]))].sort();
+  if (statuses.length === 0) throw new Error("No stock status found on the product page");
+  const inStock = !(statuses.length === 1 && statuses[0] === "OUT_OF_STOCK");
+  return { inStock, status: statuses.join("/"), price: page.match(PRICE_RE)?.[1] ?? null };
 }
 
 async function sendNtfy(env, title, body, urgent) {
@@ -100,13 +100,17 @@ async function checkOnce(env, state) {
   const now = Date.now();
   if (inStock && (!state.inStock || now - state.lastAlert >= REMIND_EVERY_MS)) {
     try {
-      await sendNtfy(
-        env,
-        "PS5 Pro IN STOCK at PlayStation Direct NL!",
-        `The PS5 Pro (2TB) is available now (status: ${status}, price: €${price}).\n\n` +
-          `Buy it here: ${STORE_URL}\n\nChecked at ${nlTime()}.`,
-        true,
-      );
+      const [title, headline] =
+        status === "QUEUE"
+          ? [
+              "PS5 Pro: PlayStation store queue is open!",
+              "PlayStation's waiting-room queue is active, so a drop is likely starting. Join it now.",
+            ]
+          : [
+              "PS5 Pro IN STOCK at PlayStation Direct NL!",
+              `The PS5 Pro (2TB) is available now (status: ${status}, price: €${price}).`,
+            ];
+      await sendNtfy(env, title, `${headline}\n\nBuy it here: ${STORE_URL}\n\nChecked at ${nlTime()}.`, true);
       state.lastAlert = now;
     } catch (err) {
       console.log(`Could not send stock alert: ${err}`);

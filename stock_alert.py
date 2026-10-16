@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Check PlayStation Direct NL for PS5 Pro stock and email an alert when it's available.
+"""Check the PlayStation NL store for PS5 Pro stock and alert (ntfy and/or email) when it's available.
 
 Runs a single check per invocation (schedule it with launchd/cron), or loops with --loop.
 Standard library only.
 """
 import argparse
+import gzip
 import json
 import os
 import smtplib
+import re
 import ssl
 import sys
 import time
@@ -23,20 +25,19 @@ STATE_FILE = ROOT / "state.json"
 # GitHub runners use UTC; show times as they are in the Netherlands.
 TIMEZONE = ZoneInfo("Europe/Amsterdam")
 
-PRODUCT_CODE = "1000050720-BX"  # PS5 Pro Console - 2TB (NL)
-STORE_URL = "https://direct.playstation.com/nl-nl/buy-consoles/playstation5-pro-console-2-tb"
-API_URL = (
-    "https://api.direct.playstation.com/commercewebservices/ps-direct-nl/users/anonymous/"
-    "products/productList?fields=BASIC&lang=nl_NL&productCodes=" + PRODUCT_CODE
-)
+# PlayStation Direct NL moved to playstation.com in Oct 2026, and the old stock API now returns 403.
+# The new product page embeds the live stock status in its server-rendered data.
+PRODUCT_ID = "PSD001-PSDE01942_39-PS5PROCHASASIRSE"  # PS5 Pro Console - 2TB (NL)
+STORE_URL = "https://www.playstation.com/nl-nl/ps5/ps5-pro/buy-now/"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/129.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "nl-NL,nl;q=0.9,en;q=0.8",
-    "Origin": "https://direct.playstation.com",
-    "Referer": STORE_URL,
+    "Accept-Encoding": "gzip",
 }
+STATUS_RE = re.compile(r'"stockLevelStatus":"([A-Z_]+)"')
+PRICE_RE = re.compile(r'"price":"([0-9.]+)","priceCurrency":"EUR"')
 # Re-send the in-stock alert at this interval while stock remains available.
 REMIND_EVERY_SECONDS = 15 * 60
 # Send one "checker is broken" email after this many consecutive failed checks.
@@ -69,17 +70,24 @@ def save_state(state):
 
 def fetch_stock():
     """Return (in_stock, status, price) for the product."""
-    req = urllib.request.Request(API_URL, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        data = json.load(resp)
-    product = data["products"][0]
-    status = product.get("stock", {}).get("stockLevelStatus", "unknown")
-    price = product.get("price", {}).get("value")
-    in_stock = (
-        product.get("purchasable", False)
-        and status in ("inStock", "lowStock")
-    ) or product.get("maxOrderQuantity", 0) > 0
-    return in_stock, status, price
+    req = urllib.request.Request(STORE_URL, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        final_url = resp.geturl()
+        raw = resp.read()
+        if resp.headers.get("Content-Encoding") == "gzip":
+            raw = gzip.decompress(raw)
+    # Sony puts a virtual waiting room in front of the store during drops.
+    if "queue" in final_url.split("/")[2]:
+        return True, "QUEUE", None
+    page = raw.decode("utf-8", "replace").replace('\\"', '"')
+    if PRODUCT_ID not in page:
+        raise ValueError(f"PS5 Pro product data not found on {final_url}")
+    statuses = set(STATUS_RE.findall(page))
+    if not statuses:
+        raise ValueError("No stock status found on the product page")
+    price = PRICE_RE.search(page)
+    in_stock = statuses != {"OUT_OF_STOCK"}
+    return in_stock, "/".join(sorted(statuses)), price.group(1) if price else None
 
 
 def send_email(subject, body):
@@ -164,10 +172,15 @@ def check_once():
 
     now = time.time()
     if in_stock and (not state["in_stock"] or now - state.get("last_alert", 0) >= REMIND_EVERY_SECONDS):
+        if status == "QUEUE":
+            title = "🚨 PS5 Pro: PlayStation store queue is open!"
+            headline = "PlayStation's waiting-room queue is active, so a drop is likely starting. Join it now."
+        else:
+            title = "🚨 PS5 Pro IN STOCK at PlayStation Direct NL!"
+            headline = f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price})."
         sent = notify(
-            "🚨 PS5 Pro IN STOCK at PlayStation Direct NL!",
-            f"The PS5 Pro (2TB) is available now (status: {status}, price: €{price}).\n\n"
-            f"Buy it here: {STORE_URL}\n\n"
+            title,
+            f"{headline}\n\nBuy it here: {STORE_URL}\n\n"
             f"Checked at {datetime.now(TIMEZONE):%Y-%m-%d %H:%M:%S %Z}.",
         )
         if not sent:

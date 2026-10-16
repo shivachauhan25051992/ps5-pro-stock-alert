@@ -1,7 +1,15 @@
 # PS5 Pro Stock Alert (PlayStation Direct NL)
 
-Polls PlayStation Direct's product API for the PS5 Pro 2TB (`1000050720-BX`) and alerts you when it's in stock with
+Reads the PS5 Pro 2TB product page on the PlayStation NL store
+(https://www.playstation.com/nl-nl/ps5/ps5-pro/buy-now/) and alerts you when it's in stock with
 an urgent [ntfy](https://ntfy.sh) phone push (and optionally email).
+
+## How stock is detected
+In Oct 2026 PlayStation Direct NL moved to playstation.com and the old stock API started returning 403.
+The new page embeds `"stockLevelStatus"` for product `PSD001-PSDE01942_39-PS5PROCHASASIRSE` in its
+server-rendered data (refreshed every 1–2 min). Anything other than `OUT_OF_STOCK` alerts, and so does a
+redirect to PlayStation's waiting-room queue. If the status disappears from the page, the check counts
+as a failure, so you get the "checker is failing" alert instead of silence.
 
 ## Run on Cloudflare Workers (primary: checks every ~30s, free)
 The `cloudflare/` Worker runs on a 1-minute cron and checks twice per run, then pushes to ntfy.
